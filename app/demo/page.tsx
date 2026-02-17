@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import React, { useEffect, useMemo, useState } from "react";
 
 type DataQuality = "High" | "Medium" | "Low";
@@ -46,7 +48,10 @@ export default function DemoPage() {
       setData(null);
 
       try {
-        const res = await fetch(`/api/intelligence?lift=${lift}`, { cache: "no-store" });
+        const res = await fetch(
+  `/api/intelligence?lift=${encodeURIComponent(lift)}`,
+  { cache: "no-store" }
+);
         const json = await res.json();
 
         if (!res.ok) {
