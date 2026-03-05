@@ -1,297 +1,317 @@
-"use client";
+'use client';
 
-import React, { useEffect, useMemo, useState } from "react";
+import { useState } from 'react';
 
-type DataQuality = "High" | "Medium" | "Low";
-
-type IntelligencePayload = {
-  series?: {
-    dates?: string[];
-    e1rm?: number[];
-    volume_7d?: number[];
-    volume_30d?: number[];
-  };
-  signals?: {
-    slope?: number;
-    plateau_detected?: boolean;
-    fatigue_index?: number;
-    readiness_score?: number;
-    acute_chronic_ratio?: number;
-  };
-  meta?: {
-    confidence_score?: number;
-    data_quality?: DataQuality;
-    observations?: number;
-  };
-};
-
-function fmtNum(n: unknown, digits = 2) {
-  if (typeof n !== "number" || Number.isNaN(n)) return "—";
-  return n.toFixed(digits);
+interface WeekData {
+  week: number;
+  weight: string;
+  sets: string;
+  reps: string;
 }
-function fmtInt(n: unknown) {
-  if (typeof n !== "number" || Number.isNaN(n)) return "—";
-  return String(Math.round(n));
-}
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+
+interface Recommendation {
+  weight: number;
+  sets: number;
+  reps: number;
+  explanations: string[];
 }
 
 export default function DemoPage() {
-  const [lift, setLift] = useState<"bench" | "squat" | "deadlift">("bench");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [data, setData] = useState<IntelligencePayload | null>(null);
-  const [raw, setRaw] = useState<any>(null);
+  const [exerciseName, setExerciseName] = useState('Back Squat');
+  const [weekData, setWeekData] = useState<WeekData[]>([
+    { week: 1, weight: '', sets: '', reps: '' },
+    { week: 2, weight: '', sets: '', reps: '' },
+    { week: 3, weight: '', sets: '', reps: '' },
+    { week: 4, weight: '', sets: '', reps: '' },
+  ]);
+  const [showResult, setShowResult] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const handleWeekDataChange = (
+    index: number,
+    field: keyof Omit<WeekData, 'week'>,
+    value: string
+  ) => {
+    const newWeekData = [...weekData];
+    newWeekData[index][field] = value;
+    setWeekData(newWeekData);
+  };
 
-    async function run() {
-      setLoading(true);
-      setErr(null);
-      setData(null);
-      setRaw(null);
+  const validateInputs = (): boolean => {
+    const newErrors: string[] = [];
 
-      try {
-        const url = `/api/intelligence?lift=${encodeURIComponent(lift)}`;
-        const res = await fetch(url, {
-          cache: "no-store",
-          headers: { accept: "application/json" },
-        });
+    if (!exerciseName.trim()) {
+      newErrors.push('Exercise name is required');
+    }
 
-        const json = await res.json().catch(async () => {
-          const text = await res.text();
-          throw new Error(`Non-JSON response. HTTP ${res.status}. Body:\n${text.slice(0, 1500)}`);
-        });
+    weekData.forEach((week) => {
+      if (!week.weight || !week.sets || !week.reps) {
+        newErrors.push(`Week ${week.week}: All fields are required`);
+      } else {
+        const weight = parseFloat(week.weight);
+        const sets = parseInt(week.sets, 10);
+        const reps = parseInt(week.reps, 10);
 
-        if (!res.ok) {
-          throw new Error(json?.error || `Request failed: HTTP ${res.status}`);
+        if (isNaN(weight) || weight < 0) {
+          newErrors.push(`Week ${week.week}: Weight must be a number ≥ 0`);
         }
-
-        if (!cancelled) {
-          setData(json as IntelligencePayload);
-          setRaw(json);
+        if (isNaN(sets) || sets < 0 || !Number.isInteger(sets)) {
+          newErrors.push(`Week ${week.week}: Sets must be a whole number ≥ 0`);
         }
-      } catch (e: any) {
-        if (!cancelled) setErr(e?.message || "Unknown error");
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (isNaN(reps) || reps < 0 || !Number.isInteger(reps)) {
+          newErrors.push(`Week ${week.week}: Reps must be a whole number ≥ 0`);
+        }
       }
-    }
+    });
 
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [lift]);
+    setErrors(newErrors);
+    return newErrors.length === 0;
+  };
 
-  // Derived recommendation: simple + safe defaults (you can align to your actual rec object if you add it to the API)
-  const derived = useMemo(() => {
-    const obs = data?.meta?.observations ?? 0;
-    const slope = data?.signals?.slope ?? 0;
-    const plateau = !!data?.signals?.plateau_detected;
-    const readiness = data?.signals?.readiness_score;
-    const confidence = data?.meta?.confidence_score;
+  const roundToNearestPlate = (weight: number): number => {
+    return Math.round(weight / 2.5) * 2.5;
+  };
 
-    // A conservative demo prescription (you can replace with your real prescription fields if/when you return them)
-    // If plateau or readiness low -> reduce; else slight increase.
-    const baseWeight =
-      lift === "bench" ? 175 : lift === "squat" ? 225 : 315;
+  const calculateRecommendation = (): Recommendation => {
+    const parsed = weekData.map((w) => {
+      const weight = parseFloat(w.weight);
+      const sets = parseInt(w.sets, 10);
+      const reps = parseInt(w.reps, 10);
+      return { week: w.week, weight, sets, reps, volume: weight * sets * reps };
+    });
 
-    const readinessNum = typeof readiness === "number" ? readiness : 80;
-    const confNum = typeof confidence === "number" ? confidence : 70;
+    const last = parsed[3];
+    const prev = parsed[2];
+    const weights = parsed.map((w) => w.weight);
+    const volumes = parsed.map((w) => w.volume);
 
-    let weight = baseWeight;
-    let sets = 3;
-    let reps = 5;
-    let deload = false;
+    const weightIncreasedEveryWeek =
+      weights[1] > weights[0] && weights[2] > weights[1] && weights[3] > weights[2];
 
-    if (obs < 6) {
-      // low data: don't get fancy
-      weight = baseWeight;
-      sets = 3;
-      reps = 5;
-    } else if (plateau || slope < 0) {
-      // plateau/negative trend: small reset
-      weight = Math.round(baseWeight * 0.95 / 5) * 5;
-      sets = 3;
-      reps = 5;
+    let nextWeight: number;
+    if (weightIncreasedEveryWeek) {
+      const lastIncrease = last.weight - prev.weight;
+      nextWeight = last.weight + lastIncrease;
     } else {
-      // positive/flat: small push
-      weight = Math.round((baseWeight + 5) / 5) * 5;
-      sets = 3;
-      reps = 5;
+      nextWeight = last.weight + 2.5;
     }
 
-    if (readinessNum < 70) {
-      deload = true;
-      weight = Math.round(weight * 0.9 / 5) * 5;
-      sets = 2;
-      reps = 5;
+    nextWeight = roundToNearestPlate(nextWeight);
+
+    const totalWeightIncrease = weights[3] - weights[0];
+    const avgWeeklyIncrease = totalWeightIncrease / 3;
+
+    const volumeTrendPositive =
+      volumes[1] >= volumes[0] && volumes[2] >= volumes[1] && volumes[3] >= volumes[2];
+
+    const progressionStalled = weights[1] === weights[2] && weights[2] === weights[3];
+
+    const explanations: string[] = [];
+
+    if (weightIncreasedEveryWeek) {
+      explanations.push(
+        `Weight increased each week (avg +${avgWeeklyIncrease.toFixed(1)} lb/week) — continuing the same progression rate.`
+      );
+    } else if (progressionStalled) {
+      explanations.push(
+        `Weight has been flat for multiple weeks — applying a small +2.5 lb nudge to restart progress.`
+      );
+    } else {
+      explanations.push(
+        `Mixed progression pattern — using a conservative +2.5 lb increase to maintain momentum.`
+      );
     }
 
-    const whyLines: string[] = [];
-    whyLines.push(`Observations used: ${obs || "—"}`);
-    whyLines.push(`Trend slope (recent e1RM): ${fmtNum(slope, 4)}`);
-    whyLines.push(`Plateau detected: ${plateau ? "Yes" : "No"}`);
-    if (typeof readiness === "number") whyLines.push(`Readiness score: ${fmtInt(readiness)}/100`);
-    if (typeof confidence === "number") whyLines.push(`Confidence score: ${fmtInt(confidence)}/100`);
-    if (deload) whyLines.push("Guardrail triggered: readiness < 70 → reduced load/volume.");
+    if (volumeTrendPositive) {
+      explanations.push(
+        `Training volume is trending upward — good sign of adaptation without obvious fatigue signals.`
+      );
+    } else {
+      explanations.push(
+        `Training volume fluctuated — holding the same set/rep scheme to consolidate before pushing harder.`
+      );
+    }
 
-    const confidenceScore = clamp(confNum, 0, 100);
+    explanations.push(
+      `Prescription keeps Week 4 sets/reps and adjusts load to drive progressive overload with minimal risk.`
+    );
 
     return {
-      weight,
-      sets,
-      reps,
-      deload,
-      confidenceScore,
-      whyLines,
+      weight: nextWeight,
+      sets: last.sets,
+      reps: last.reps,
+      explanations,
     };
-  }, [data, lift]);
+  };
 
-  const rangeText = useMemo(() => {
-    const dates = data?.series?.dates;
-    if (!dates || dates.length < 2) return "—";
-    const start = new Date(dates[0]);
-    const end = new Date(dates[dates.length - 1]);
-    const fmt = (d: Date) =>
-      d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-    return `${fmt(start)} → ${fmt(end)}`;
-  }, [data]);
-
-  const obsText = data?.meta?.observations != null ? String(data.meta.observations) : "—";
-  const dqText = data?.meta?.data_quality ?? "—";
-  const confText = data?.meta?.confidence_score != null ? `${Math.round(data.meta.confidence_score)}/100` : "—";
-  const readinessText =
-    data?.signals?.readiness_score != null ? `${Math.round(data.signals.readiness_score)}/100` : "—";
+  const handleGenerateWeek5 = () => {
+    if (!validateInputs()) {
+      setShowResult(false);
+      return;
+    }
+    const rec = calculateRecommendation();
+    setRecommendation(rec);
+    setShowResult(true);
+    setTimeout(() => {
+      document.getElementById('result-section')?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+  };
 
   return (
-    <div style={{ padding: 24, maxWidth: 1100, margin: "0 auto" }}>
-      <h1 style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>
-        Workout Intelligence Demo
-      </h1>
-      <p style={{ opacity: 0.8, marginBottom: 18 }}>
-        Deterministic “signal engine” over Supabase workout data. Recommendation + confidence + explainability.
-      </p>
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 py-12 px-4">
+      <div className="max-w-4xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-4xl font-bold text-slate-900 mb-2">Workout Intelligence Demo</h1>
+          <p className="text-slate-600">
+            Enter your last 4 weeks of training data to get a Week 5 prescription
+          </p>
+        </div>
 
-      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 520px", minWidth: 320 }}>
-          <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <label style={{ fontWeight: 700 }}>Lift</label>
-                <select
-                  value={lift}
-                  onChange={(e) => setLift(e.target.value as any)}
-                  style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid rgba(0,0,0,0.2)" }}
-                >
-                  <option value="bench">Bench</option>
-                  <option value="squat">Squat</option>
-                  <option value="deadlift">Deadlift</option>
-                </select>
-              </div>
+        <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
+          <div className="mb-8">
+            <label htmlFor="exercise-name" className="block text-sm font-semibold text-slate-700 mb-2">
+              Exercise
+            </label>
+            <input
+              id="exercise-name"
+              type="text"
+              value={exerciseName}
+              onChange={(e) => setExerciseName(e.target.value)}
+              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all text-slate-900"
+              placeholder="e.g., Back Squat"
+            />
+          </div>
 
-              <div style={{ opacity: 0.75, fontWeight: 600 }}>
-                Observations: {obsText} · {rangeText}
-              </div>
+          <div className="mb-8">
+            <h2 className="text-lg font-semibold text-slate-900 mb-4">Training History</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="border-b-2 border-slate-200">
+                    <th className="text-left py-3 px-4 text-sm font-semibold text-slate-700">Week</th>
+                    <th className="text-left py-3 px-4 text-sm font-semibold text-slate-700">Weight (lb)</th>
+                    <th className="text-left py-3 px-4 text-sm font-semibold text-slate-700">Sets</th>
+                    <th className="text-left py-3 px-4 text-sm font-semibold text-slate-700">Reps</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {weekData.map((week, index) => (
+                    <tr key={week.week} className="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                      <td className="py-3 px-4 font-medium text-slate-900">Week {week.week}</td>
+                      <td className="py-3 px-4">
+                        <input
+                          type="number"
+                          value={week.weight}
+                          onChange={(e) => handleWeekDataChange(index, 'weight', e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-slate-900"
+                          placeholder="e.g., 205"
+                          min="0"
+                          step="2.5"
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        <input
+                          type="number"
+                          value={week.sets}
+                          onChange={(e) => handleWeekDataChange(index, 'sets', e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-slate-900"
+                          placeholder="e.g., 3"
+                          min="0"
+                          step="1"
+                        />
+                      </td>
+                      <td className="py-3 px-4">
+                        <input
+                          type="number"
+                          value={week.reps}
+                          onChange={(e) => handleWeekDataChange(index, 'reps', e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-slate-900"
+                          placeholder="e.g., 5"
+                          min="0"
+                          step="1"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
-          {loading && (
-            <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 16 }}>
-              Loading…
+          {errors.length > 0 && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <h3 className="text-sm font-semibold text-red-800 mb-2">Please fix the following errors:</h3>
+              <ul className="list-disc list-inside space-y-1">
+                {errors.map((error, index) => (
+                  <li key={index} className="text-sm text-red-700">
+                    {error}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
-          {err && (
-            <div style={{ border: "1px solid rgba(255,0,0,0.35)", borderRadius: 12, padding: 16, color: "#b00020" }}>
-              <div style={{ fontWeight: 800, marginBottom: 6 }}>Error</div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{err}</pre>
-            </div>
-          )}
-
-          {!loading && !err && data && (
-            <>
-              <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <div>
-                    <div style={{ fontWeight: 800, marginBottom: 8 }}>Next Session Recommendation</div>
-                    <div style={{ fontSize: 28, fontWeight: 900 }}>
-                      {derived.weight} lb · {derived.sets} sets × {derived.reps} reps
-                    </div>
-                    <div style={{ marginTop: 8, opacity: 0.75 }}>
-                      Deload flag: <b>{derived.deload ? "Yes" : "No"}</b>
-                    </div>
-                  </div>
-
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontWeight: 800, marginBottom: 8 }}>Confidence</div>
-                    <div style={{ fontSize: 28, fontWeight: 900 }}>{confText}</div>
-                    <div style={{ marginTop: 8, opacity: 0.75 }}>
-                      Data quality: <b>{dqText}</b>
-                    </div>
-                    <div style={{ marginTop: 8, opacity: 0.75 }}>
-                      Readiness: <b>{readinessText}</b>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-                <div style={{ flex: "1 1 240px", minWidth: 220, border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 16 }}>
-                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Trend Slope</div>
-                  <div style={{ fontSize: 24, fontWeight: 900 }}>
-                    {fmtNum(data?.signals?.slope, 4)}
-                  </div>
-                  <div style={{ opacity: 0.75, marginTop: 6 }}>Linear regression on recent e1RM.</div>
-                </div>
-
-                <div style={{ flex: "1 1 240px", minWidth: 220, border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 16 }}>
-                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Plateau</div>
-                  <div style={{ fontSize: 24, fontWeight: 900 }}>
-                    {data?.signals?.plateau_detected ? "Detected" : "Not detected"}
-                  </div>
-                  <div style={{ opacity: 0.75, marginTop: 6 }}>Rule-based + trend gating.</div>
-                </div>
-              </div>
-
-              <details style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-                <summary style={{ cursor: "pointer", fontWeight: 800 }}>Why this recommendation?</summary>
-                <div style={{ marginTop: 10, opacity: 0.95 }}>
-                  <ul style={{ margin: 0, paddingLeft: 18 }}>
-                    {derived.whyLines.map((line, i) => (
-                      <li key={i}>{line}</li>
-                    ))}
-                  </ul>
-                </div>
-              </details>
-
-              <details style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 12 }}>
-                <summary style={{ cursor: "pointer", fontWeight: 800 }}>Debug: intelligence payload</summary>
-                <pre style={{ marginTop: 10, padding: 12, borderRadius: 10, background: "rgba(0,0,0,0.04)", overflowX: "auto", fontSize: 12, lineHeight: 1.4 }}>
-                  {JSON.stringify(raw, null, 2)}
-                </pre>
-              </details>
-            </>
-          )}
+          <button
+            onClick={handleGenerateWeek5}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+          >
+            Generate Week 5 Recommendation
+          </button>
         </div>
 
-        <div style={{ flex: "0 1 360px", minWidth: 300 }}>
-          <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, padding: 16 }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>About the AI Engine (MVP)</div>
-            <ol style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
-              <li><b>Feature engineering</b>: e1RM (Epley), volume, rolling volume.</li>
-              <li><b>Signal detection</b>: trend slope + plateau + fatigue/readiness heuristics.</li>
-              <li><b>Uncertainty</b>: confidence score + data quality gating.</li>
-              <li><b>Prescriptive output</b>: next session weight/sets/reps + guardrails.</li>
-            </ol>
-            <p style={{ opacity: 0.8, marginTop: 10 }}>
-              Next: explicit prescription object from API, what-if simulator, archetypes, evaluation metrics.
-            </p>
+        {showResult && recommendation && (
+          <div id="result-section" className="bg-white rounded-xl shadow-lg p-8 border-l-4 border-blue-600">
+            <div className="flex items-start mb-4">
+              <div className="flex-shrink-0 w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mr-4">
+                <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h2 className="text-2xl font-bold text-slate-900 mb-1">Week 5 Prescription</h2>
+                <p className="text-slate-600">Based on your progression pattern</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-6 mb-6">
+              <div className="text-center">
+                <div className="text-sm font-medium text-slate-600 mb-2">{exerciseName}</div>
+                <div className="text-5xl font-bold text-slate-900 mb-2">
+                  {recommendation.weight} <span className="text-2xl text-slate-600">lb</span>
+                </div>
+                <div className="text-xl text-slate-700">
+                  {recommendation.sets} sets × {recommendation.reps} reps
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 mb-3">Why this recommendation?</h3>
+              <ul className="space-y-3">
+                {recommendation.explanations.map((explanation, index) => (
+                  <li key={index} className="flex items-start">
+                    <span className="flex-shrink-0 w-6 h-6 bg-blue-100 rounded-full flex items-center justify-center mr-3 mt-0.5">
+                      <span className="text-blue-600 text-sm font-bold">{index + 1}</span>
+                    </span>
+                    <span className="text-slate-700">{explanation}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="mt-6 pt-6 border-t border-slate-200">
+              <p className="text-sm text-slate-500 italic">
+                Deterministic recommendation based on your last 4 weeks of logged training.
+              </p>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
